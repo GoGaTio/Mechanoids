@@ -1,4 +1,4 @@
-﻿using RimWorld;
+using RimWorld;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using UnityEngine;
 using Verse;
 using Verse.Noise;
+using Verse.Sound;
 using static HarmonyLib.Code;
 using static UnityEngine.GraphicsBuffer;
 
@@ -31,7 +32,6 @@ namespace ApexMechanoids
 					GraphicData data = new GraphicData();
 					data.CopyFrom(def.graphicData);
 					data.texPath = data.texPath.Remove(data.texPath.Length - 1) + num.ToString();
-					data.drawSize = new Vector2(def.graphicData.drawSize.x, flipped ? -def.graphicData.drawSize.y : def.graphicData.drawSize.y);
 					graphicInt = data.GraphicColoredFor(this);
 				}
 				return graphicInt;
@@ -39,7 +39,6 @@ namespace ApexMechanoids
 		}
 
 		public bool flag = false;
-		public bool flipped = false;
 
 		public override void Tick()
 		{
@@ -60,8 +59,6 @@ namespace ApexMechanoids
 	{
 		public override DamageWorker.DamageResult ApplyMeleeDamageToTarget(LocalTargetInfo target)
 		{
-			if (CasterPawn != null)
-				CasterPawn.rotationTracker.FaceCell(target.Cell);
 			Verb_Whip.Cast(Caster, target, out var result, EquipmentSource, tool);
 			return result;
 		}
@@ -157,8 +154,7 @@ namespace ApexMechanoids
 			{
 				return false;
 			}
-			if (CasterPawn != null)
-				CasterPawn.rotationTracker.FaceCell(currentTarget.Cell);
+			IntVec3 position = caster.Position;
 			Cast(Caster, currentTarget, out var _, EquipmentSource, EquipmentSource.def.tools.FirstOrDefault((x)=>x.capacities.Any((y)=>y.defName == "APM_Whip")));
 			lastShotTick = Find.TickManager.TicksGame;
 			return true;
@@ -173,17 +169,12 @@ namespace ApexMechanoids
 			{
 				moteDef = DefDatabase<ThingDef>.GetNamed("APM_Mote_Whip");
 			}
-			float whipAngle = caster.TrueCenter().AngleToFlat(target.CenterVector3);
-				Vector3 vec = new Vector3(0.5f, 0f, 0f).RotatedBy(whipAngle);
-				Mote whipMote = MoteMaker.MakeInteractionOverlay(moteDef, caster, new TargetInfo(target.Cell, map), Vector3.zero, vec);
-			if (whipMote is Mote_Whip moteWhip)
-			{
-				moteWhip.flipped = whipAngle >= 180f;
-			}
+			Vector3 vec = new Vector3(1.5f, 0f, 0f).RotatedBy(caster.TrueCenter().AngleToFlat(target.CenterVector3));
+			MoteMaker.MakeInteractionOverlay(moteDef, caster, new TargetInfo(target.Cell, map), vec * 0.5f, vec);
 			result = null;
 			if (target.HasThing)
 			{
-				result = target.Thing.TakeDamage(GetDamageInfo(caster, target, source, tool.power, tool));
+				result = UseWhipOn(target.Thing, caster, source, tool);
 			}
 			List<IntVec3> cells = AffectedCells(caster, target, WhipWidth);
 			if (cells.Any())
@@ -194,26 +185,42 @@ namespace ApexMechanoids
 					{
 						if (target.Thing != t && ((t.Faction == null && t is Building) || t.HostileTo(caster)))
 						{
-							t.TakeDamage(GetDamageInfo(caster, t, source, tool.power * 0.5f, tool));
+							UseWhipOn(t, caster, source, tool, 0.5f);
 						}
 					}
 				}
 			}
 		}
 
-		public static DamageInfo GetDamageInfo(Thing caster, LocalTargetInfo target, Thing source = null, float amount = 10f, Tool tool = null)
+		public static DamageWorker.DamageResult UseWhipOn(Thing target, Thing caster, Thing source = null, Tool tool = null, float damageFactor = 1f)
 		{
-			Vector3 direction = (target.Thing.Position - caster.Position).ToVector3();
+			Vector3 direction = (target.Position - caster.Position).ToVector3();
 			bool instigatorGuilty = !(caster is Pawn pawn) || !pawn.Drafted;
+			float amount = tool.AdjustedBaseMeleeDamageAmount(source, DamageDefOf.Cut) * damageFactor;
 			DamageInfo damageInfo = new DamageInfo(DamageDefOf.Cut, amount, amount * 0.015f, -1f, caster, null, source?.def, DamageInfo.SourceCategory.ThingOrUnknown, null, instigatorGuilty);
 			damageInfo.SetBodyRegion(BodyPartHeight.Undefined, BodyPartDepth.Outside);
 			damageInfo.SetAngle(direction);
 			damageInfo.SetTool(tool);
-			if(source != null && source.TryGetQuality(out var quality))
+			if (source != null && source.TryGetQuality(out var quality))
 			{
 				damageInfo.SetWeaponQuality(quality);
 			}
-			return damageInfo;
+			DamageWorker.DamageResult result = target.TakeDamage(damageInfo);
+			if (tool != null && !tool.extraMeleeDamages.NullOrEmpty())
+			{
+				foreach (var item in tool.extraMeleeDamages)
+				{
+					if (!Rand.Chance(item.chance))
+					{
+						continue;
+					}
+					float amountLocal = item.amount > 0 ? item.amount : item.def.defaultDamage;
+					damageInfo.Def = item.def;
+					damageInfo.SetAmount(amountLocal * damageFactor);
+					damageInfo.armorPenetrationInt = item.armorPenetration < 0 ? (amountLocal * 0.015f) : item.armorPenetration;
+				}
+			}
+			return result;
 		}
 
 		public override bool Available()
